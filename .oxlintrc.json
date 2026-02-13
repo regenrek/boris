@@ -1,0 +1,9 @@
+{
+  "$schema": "https://oxc.rs/schemas/oxlintrc.schema.json",
+  "plugins": ["typescript"],
+  "ignorePatterns": [
+    "node_modules/**",
+    "dist/**",
+    ".vercel/**"
+  ]
+}

@@ -1,72 +1,176 @@
 import { Client } from "@notionhq/client";
-import { downloadSlackFile, createFileNotionBlocks, uploadFileToNotion } from "../utils/file-handler.js";
+import {
+  createFileNotionBlocks,
+  downloadSlackFile,
+  uploadFileToNotion,
+} from "../utils/file-handler.js";
+import { fetchJsonWithRetry } from "../../utils/http.js";
+
+type NotionUser = {
+  id: string;
+  type: string;
+  name?: string | null;
+  person?: {
+    email?: string | null;
+  };
+};
+
+type NotionProject = {
+  id: string;
+  name: string;
+};
+
+type CacheEntry<T> = {
+  value: T;
+  expiresAt: number;
+};
+
+const USERS_CACHE_TTL_MS = 60_000;
+const PROJECTS_CACHE_TTL_MS = 60_000;
+const NOTION_USER_ID_PATTERN =
+  /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const SLACK_USER_ID_PATTERN = /^U[A-Z0-9]{8,}$/i;
+
+function normalizeValue(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeSlackUserId(assignee: string): string | null {
+  const trimmed = assignee.trim();
+  const mentionMatch = trimmed.match(/^<@(U[A-Z0-9]+)>$/i);
+  const maybeSlackId = mentionMatch?.[1] || trimmed;
+
+  return SLACK_USER_ID_PATTERN.test(maybeSlackId)
+    ? maybeSlackId.toUpperCase()
+    : null;
+}
 
 export class NotionService {
   private client: Client;
+  private usersCache: CacheEntry<NotionUser[]> | null = null;
+  private projectsCache: CacheEntry<NotionProject[]> | null = null;
 
-  constructor() {
-    this.client = new Client({
-      auth: process.env.NOTION_API_KEY,
-    });
+  constructor(client?: Client) {
+    this.client =
+      client ||
+      new Client({
+        auth: process.env.NOTION_API_KEY,
+      });
   }
 
-  async getUsers() {
+  private readCache<T>(cache: CacheEntry<T> | null): T | null {
+    if (!cache) {
+      return null;
+    }
+
+    if (cache.expiresAt <= Date.now()) {
+      return null;
+    }
+
+    return cache.value;
+  }
+
+  private setUsersCache(users: NotionUser[]): void {
+    this.usersCache = {
+      value: users,
+      expiresAt: Date.now() + USERS_CACHE_TTL_MS,
+    };
+  }
+
+  private setProjectsCache(projects: NotionProject[]): void {
+    this.projectsCache = {
+      value: projects,
+      expiresAt: Date.now() + PROJECTS_CACHE_TTL_MS,
+    };
+  }
+
+  private getConfiguredDefaultProjectName(): string | undefined {
+    const value = process.env.NOTION_DEFAULT_PROJECT_NAME?.trim();
+    return value ? value : undefined;
+  }
+
+  async getUsers(forceRefresh = false): Promise<NotionUser[]> {
+    const cachedUsers = !forceRefresh ? this.readCache(this.usersCache) : null;
+    if (cachedUsers) {
+      return cachedUsers;
+    }
+
     try {
       const response = await this.client.users.list({});
-      return response.results;
+      const users = response.results as NotionUser[];
+      this.setUsersCache(users);
+      return users;
     } catch (error) {
       console.error("Error fetching Notion users:", error);
       return [];
     }
   }
 
-  async findUserByEmail(email: string) {
-    const users = await this.getUsers();
-    return users.find(user => 
-      user.type === "person" && 
-      user.person?.email === email
+  async findUserByEmail(
+    email: string,
+    users?: NotionUser[]
+  ): Promise<NotionUser | undefined> {
+    const sourceUsers = users || (await this.getUsers());
+    const normalizedEmail = normalizeValue(email);
+
+    return sourceUsers.find(
+      (user) =>
+        user.type === "person" &&
+        user.person?.email &&
+        normalizeValue(user.person.email) === normalizedEmail
     );
   }
 
-  async findUserByName(name: string) {
-    const users = await this.getUsers();
-    return users.find(user => 
-      user.type === "person" && 
-      user.name?.toLowerCase().includes(name.toLowerCase())
+  async findUserByName(
+    name: string,
+    users?: NotionUser[]
+  ): Promise<NotionUser | undefined> {
+    const sourceUsers = users || (await this.getUsers());
+    const normalizedName = normalizeValue(name);
+
+    return sourceUsers.find(
+      (user) =>
+        user.type === "person" &&
+        typeof user.name === "string" &&
+        normalizeValue(user.name).includes(normalizedName)
     );
   }
 
-  async getProjects() {
+  async getProjects(forceRefresh = false): Promise<NotionProject[]> {
+    const projectsDatabaseId = process.env.NOTION_PROJECTS_DATABASE_ID;
+    if (!projectsDatabaseId) {
+      return [];
+    }
+
+    const cachedProjects = !forceRefresh
+      ? this.readCache(this.projectsCache)
+      : null;
+    if (cachedProjects) {
+      return cachedProjects;
+    }
+
     try {
-      const projectsDatabaseId = process.env.NOTION_PROJECTS_DATABASE_ID;
-      
-      if (!projectsDatabaseId) {
-        console.error("NOTION_PROJECTS_DATABASE_ID environment variable not set");
-        return [];
-      }
-      
-      // Query the projects database
-      const response = await this.client.databases.query({
-        database_id: projectsDatabaseId,
+      const response = await this.client.dataSources.query({
+        data_source_id: projectsDatabaseId,
         page_size: 100,
         sorts: [
           {
             property: "Name",
-            direction: "ascending"
-          }
-        ]
+            direction: "ascending",
+          },
+        ],
       });
-      
-      // Extract project information
+
       const projects = response.results.map((page: any) => ({
         id: page.id,
-        name: page.properties?.Name?.title?.[0]?.text?.content || 
-              page.properties?.title?.title?.[0]?.text?.content || 
-              page.properties?.Titel?.title?.[0]?.text?.content || 
-              'Unnamed Project'
+        name:
+          page.properties?.Name?.title?.[0]?.text?.content ||
+          page.properties?.title?.title?.[0]?.text?.content ||
+          page.properties?.Titel?.title?.[0]?.text?.content ||
+          "Unnamed Project",
       }));
-      
-      console.log(`Found ${projects.length} projects from projects database`);
+
+      this.setProjectsCache(projects);
       return projects;
     } catch (error) {
       console.error("Error fetching Notion projects:", error);
@@ -74,45 +178,67 @@ export class NotionService {
     }
   }
 
-  async findProjectByName(name: string) {
-    const projects = await this.getProjects();
-    return projects.find((project: any) => 
-      project.name.toLowerCase() === name.toLowerCase()
+  async findProjectByName(
+    name: string,
+    projects?: NotionProject[]
+  ): Promise<NotionProject | undefined> {
+    const sourceProjects = projects || (await this.getProjects());
+    const normalizedName = normalizeValue(name);
+
+    return sourceProjects.find(
+      (project) => normalizeValue(project.name) === normalizedName
     );
   }
 
-  async getDefaultProject() {
-    const defaultProjectName = "Instructa.ai - Website, SEO & Design";
-    let project = await this.findProjectByName(defaultProjectName);
-    
-    if (!project) {
-      // If default project doesn't exist, log a warning
-      console.warn(`Default project "${defaultProjectName}" not found in Notion. Tasks will be created without a project.`);
+  async getDefaultProject(
+    projects?: NotionProject[]
+  ): Promise<NotionProject | undefined> {
+    const configuredDefaultProjectName = this.getConfiguredDefaultProjectName();
+    if (!configuredDefaultProjectName) {
+      return undefined;
     }
-    
-    return project;
+
+    return this.findProjectByName(configuredDefaultProjectName, projects);
   }
 
-  // Helper to get Slack user info and map to Notion user
-  async getSlackUserInfo(slackUserId: string): Promise<{ email?: string; name?: string }> {
-    try {
-      const response = await fetch(`https://slack.com/api/users.info?user=${slackUserId}`, {
-        headers: {
-          'Authorization': `Bearer ${process.env.SLACK_BOT_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-      });
-      const data: any = await response.json();
-      if (data.ok && data.user) {
-        return {
-          email: data.user.profile?.email,
-          name: data.user.real_name || data.user.name,
-        };
-      }
-    } catch (error) {
-      console.error("Error fetching Slack user info:", error);
+  async getSlackUserInfo(
+    slackUserId: string
+  ): Promise<{ email?: string; name?: string }> {
+    const slackToken = process.env.SLACK_BOT_TOKEN;
+    if (!slackToken) {
+      return {};
     }
-    return {};
+
+    try {
+      const { response, data } = await fetchJsonWithRetry<any>(
+        `https://slack.com/api/users.info?user=${encodeURIComponent(slackUserId)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${slackToken}`,
+            "Content-Type": "application/json",
+          },
+        },
+        {
+          timeoutMs: 8_000,
+          retries: 2,
+        }
+      );
+
+      if (!response.ok || !data?.ok || !data.user) {
+        return {};
+      }
+
+      return {
+        email: data.user.profile?.email,
+        name: data.user.real_name || data.user.name,
+      };
+    } catch (error) {
+      console.error(
+        "Error fetching Slack user info:",
+        error instanceof Error ? error.message : String(error)
+      );
+      return {};
+    }
   }
 
   async createTask(data: {
@@ -139,7 +265,10 @@ export class NotionService {
       | "Archiviert";
     files?: any[];
   }) {
-    const databaseId = process.env.NOTION_DATABASE_ID!;
+    const databaseId = process.env.NOTION_DATABASE_ID;
+    if (!databaseId) {
+      throw new Error("NOTION_DATABASE_ID environment variable is not set");
+    }
 
     const properties: any = {
       Name: {
@@ -171,72 +300,68 @@ export class NotionService {
       };
     }
 
-    // Handle project relation
-    if (data.project) {
-      // Find the project by name
-      let project = await this.findProjectByName(data.project);
-      
-      // If the specified project is not found and it's the default, try to get any available project
-      if (!project && data.project === "Instructa.ai - Website, SEO & Design") {
-        project = await this.getDefaultProject();
-      }
-      
+    const requestedProjectName = data.project?.trim();
+    const configuredDefaultProjectName = this.getConfiguredDefaultProjectName();
+
+    if (requestedProjectName || configuredDefaultProjectName) {
+      const projects = await this.getProjects();
+      const project = requestedProjectName
+        ? await this.findProjectByName(requestedProjectName, projects)
+        : await this.getDefaultProject(projects);
+
       if (project) {
         properties["Projekt"] = {
-          relation: [{ id: project.id }]
+          relation: [{ id: project.id }],
         };
-      } else {
-        console.warn(`Project "${data.project}" not found in Notion. Creating task without project.`);
+      } else if (requestedProjectName) {
+        console.warn(
+          `Project "${requestedProjectName}" not found in Notion. Creating task without project.`
+        );
       }
     }
 
-    // Try to find the Notion user by name or email
+    let unresolvedAssignee: string | undefined;
+
     if (data.assignee) {
-      let notionUser;
-      
-      // Check if assignee is already a Notion user ID (32 char hex string with dashes)
-      if (data.assignee.match(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i)) {
-        // It's already a Notion user ID, use it directly
+      const assigneeValue = data.assignee.trim();
+
+      if (NOTION_USER_ID_PATTERN.test(assigneeValue)) {
         properties.Verantwortlich = {
-          people: [{ id: data.assignee }]
+          people: [{ id: assigneeValue }],
         };
-      } else if (data.assignee.startsWith("U") && data.assignee.length > 8) {
-        // It's a Slack user ID
-        const slackUserInfo = await this.getSlackUserInfo(data.assignee);
-        
-        // Try to find by email first
-        if (slackUserInfo.email) {
-          notionUser = await this.findUserByEmail(slackUserInfo.email);
-        }
-        
-        // If not found by email, try by name
-        if (!notionUser && slackUserInfo.name) {
-          notionUser = await this.findUserByName(slackUserInfo.name);
-        }
-        
-        if (notionUser) {
-          properties.Verantwortlich = {
-            people: [{ id: notionUser.id }]
-          };
-        }
       } else {
-        // Direct email or name was provided
-        if (data.assignee.includes("@")) {
-          notionUser = await this.findUserByEmail(data.assignee);
+        const users = await this.getUsers();
+        let notionUser: NotionUser | undefined;
+
+        const slackUserId = normalizeSlackUserId(assigneeValue);
+        if (slackUserId) {
+          const slackUserInfo = await this.getSlackUserInfo(slackUserId);
+
+          if (slackUserInfo.email) {
+            notionUser = await this.findUserByEmail(slackUserInfo.email, users);
+          }
+
+          if (!notionUser && slackUserInfo.name) {
+            notionUser = await this.findUserByName(slackUserInfo.name, users);
+          }
+        } else if (assigneeValue.includes("@")) {
+          notionUser = await this.findUserByEmail(assigneeValue, users);
         } else {
-          notionUser = await this.findUserByName(data.assignee);
+          notionUser = await this.findUserByName(assigneeValue, users);
         }
-        
+
         if (notionUser) {
           properties.Verantwortlich = {
-            people: [{ id: notionUser.id }]
+            people: [{ id: notionUser.id }],
           };
+        } else {
+          unresolvedAssignee = assigneeValue;
         }
       }
     }
 
-    // Create page content with description and assignee info
     const children: any[] = [];
+
     if (data.description) {
       children.push({
         object: "block",
@@ -253,9 +378,8 @@ export class NotionService {
         },
       });
     }
-    
-    // Only add assignee to content if we couldn't find them in Notion users
-    if (data.assignee && !properties.Verantwortlich) {
+
+    if (unresolvedAssignee) {
       children.push({
         object: "block",
         type: "paragraph",
@@ -264,15 +388,14 @@ export class NotionService {
             {
               type: "text",
               text: {
-                content: `Assigned to: ${data.assignee} (Slack user)`,
+                content: `Assigned to: ${unresolvedAssignee} (unmapped user)`,
               },
             },
           ],
         },
       });
     }
-    
-    // Add file information if files were shared
+
     if (data.files && data.files.length > 0) {
       children.push({
         object: "block",
@@ -288,24 +411,16 @@ export class NotionService {
           ],
         },
       });
-      
-      // Process each file
-      for (const file of data.files) {
-        console.log("Processing file from Slack:", file);
-        
-        // Download the file from Slack
+
+      for (let index = 0; index < data.files.length; index += 1) {
+        const file = data.files[index];
         const fileInfo = await downloadSlackFile(file);
-        
+
         if (fileInfo) {
-          // Upload the file to Notion
           const fileUploadId = await uploadFileToNotion(fileInfo);
-          
-          // Create file blocks
           const fileBlocks = createFileNotionBlocks(fileInfo, fileUploadId);
-          console.log("Adding file blocks to Notion page:", fileBlocks);
           children.push(...fileBlocks);
-          
-          // If upload failed, add fallback information
+
           if (!fileUploadId) {
             children.push({
               object: "block",
@@ -324,9 +439,8 @@ export class NotionService {
                 ],
               },
             });
-            
-            // Add Slack link if available
-            if (file.permalink_public || file.url_private) {
+
+            if (file?.permalink_public || file?.url_private) {
               children.push({
                 object: "block",
                 type: "paragraph",
@@ -337,8 +451,8 @@ export class NotionService {
                       text: {
                         content: "View in Slack →",
                         link: {
-                          url: file.permalink_public || file.url_private
-                        }
+                          url: file.permalink_public || file.url_private,
+                        },
                       },
                     },
                   ],
@@ -347,7 +461,6 @@ export class NotionService {
             }
           }
         } else {
-          // If download failed, add a note
           children.push({
             object: "block",
             type: "callout",
@@ -359,25 +472,26 @@ export class NotionService {
                 {
                   type: "text",
                   text: {
-                    content: `Could not download file "${file.name}" from Slack.`,
+                    content: `Could not download file "${file?.name || "unknown file"}" from Slack.`,
                   },
                 },
               ],
             },
           });
         }
-        
-        // Add spacing between files (but not after the last one)
-        if (data.files.indexOf(file) < data.files.length - 1) {
+
+        if (index < data.files.length - 1) {
           children.push({
             object: "block",
             type: "paragraph",
             paragraph: {
-              rich_text: [{
-                type: "text",
-                text: { content: " " }
-              }]
-            }
+              rich_text: [
+                {
+                  type: "text",
+                  text: { content: " " },
+                },
+              ],
+            },
           });
         }
       }

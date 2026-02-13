@@ -1,8 +1,10 @@
-import { Workflow, createStep } from "@mastra/core";
+import { Workflow, createStep } from "@mastra/core/workflows";
 import { z } from "zod";
 import { NotionService } from "../integrations/notion.js";
 import { openai } from "@ai-sdk/openai";
 import { generateObject } from "ai";
+
+const configuredDefaultProject = process.env.NOTION_DEFAULT_PROJECT_NAME?.trim();
 
 const taskSchema = z.object({
   title: z.string().describe("A clear, concise title for the task"),
@@ -32,7 +34,7 @@ const taskSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Either a Notion user ID from the provided list OR a Slack user ID (format: <@U12345>). Only set if explicitly mentioned in the message."
+      "Either a Notion user ID from the provided list or a Slack user ID (U12345 or <@U12345>). Only set if explicitly mentioned."
     ),
   includeFileIds: z
     .array(z.string())
@@ -74,27 +76,32 @@ const parseMessageStep = createStep({
     project: z.string().optional(),
     files: z.array(z.any()).optional(),
   }),
-  execute: async ({ inputData }) => {
+  execute: async ({ inputData }: { inputData: any }) => {
     const { text, user, files } = inputData;
 
     try {
-      // Fetch Notion users and projects
       const notionService = new NotionService();
       const [notionUsers, availableProjects] = await Promise.all([
         notionService.getUsers(),
         notionService.getProjects(),
       ]);
 
-      // Create a list of available users for the AI
       const userList = notionUsers
-        .filter((u) => u.type === "person" && u.name)
-        .map((u) => ({
+        .filter((u: any) => u.type === "person" && u.name)
+        .map((u: any) => ({
           name: u.name,
           id: u.id,
-          email: (u as any).person?.email || null,
         }));
 
-      // Use AI to parse the message
+      const availableProjectList =
+        availableProjects.length > 0
+          ? availableProjects.map((p: { name: string }) => `- ${p.name}`).join("\n")
+          : "- None configured";
+
+      const defaultProjectInstruction = configuredDefaultProject
+        ? `If project is unclear, use "".`
+        : "If project is unclear, leave project empty.";
+
       const result = await generateObject({
         model: openai("gpt-4o-mini"),
         schema: taskSchema,
@@ -124,18 +131,18 @@ Focus on:
 `
     : ""
 }
-        
+
 Input: "${text}"
 
 Today's date: ${new Date().toISOString().split("T")[0]}
 
 Available Notion users for assignment:
 ${userList
-  .map((u) => `- ${u.name}${u.email ? ` (${u.email})` : ""} - ID: ${u.id}`)
+  .map((u: { name: string; id: string }) => `- ${u.name} - ID: ${u.id}`)
   .join("\n")}
 
 Available projects:
-${availableProjects.length > 0 ? availableProjects.map((p) => `- ${p.name}`).join("\n") : "- Instructa.ai - Website, SEO & Design (default)"}
+${availableProjectList}
 
 Guidelines:
 - Create a clear, actionable task title that captures the main request
@@ -145,15 +152,15 @@ Guidelines:
   * References to people, systems, or resources discussed
   * If the conversation seems to reference earlier context not provided, note: "Note: This conversation may reference earlier context not included here."
 - Priority mapping:
-  * "immediate", "urgent", "asap", "fire", "critical" → "Immediate 🔥"
-  * "quick", "fast", "lightning" → "Quick ⚡"
-  * "high priority", "important", "prio 1" → "Prio: 1st 🚀"
-  * "second", "prio 2" → "2nd Prio"
-  * "remember", "don't forget" → "Remember 💭"
-  * default → "Prio: 1st 🚀"
+  * "immediate", "urgent", "asap", "fire", "critical" -> "Immediate 🔥"
+  * "quick", "fast", "lightning" -> "Quick ⚡"
+  * "high priority", "important", "prio 1" -> "Prio: 1st 🚀"
+  * "second", "prio 2" -> "2nd Prio"
+  * "remember", "don't forget" -> "Remember 💭"
+  * default -> "3rd Prio"
 - For assignees:
   * Match mentioned names to Notion users (case-insensitive, partial matches OK)
-  * Handle @mentions (format: <@U12345>)
+  * Handle Slack IDs in either U12345 or <@U12345> format
   * If no assignee mentioned, leave empty
 - For due dates:
   * Convert relative dates (tomorrow, next week, etc.) to YYYY-MM-DD
@@ -163,19 +170,26 @@ Guidelines:
   * If files are mentioned in the conversation (shown as [File: filename (type)]), evaluate if they are relevant to the task
   * Only include files in includeFileIds that are directly needed for completing the task
   * Mention relevant files in the description explaining why they're important
-  * Available files: ${files && files.length > 0 ? files.map((f: any) => `ID: ${f.id}, Name: ${f.name || "Untitled"}, Type: ${f.mimetype || "unknown"}`).join("; ") : "None"}
+  * Available files: ${
+    files && files.length > 0
+      ? files
+          .map(
+            (f: any) =>
+              `ID: ${f.id}, Name: ${f.name || "Untitled"}, Type: ${f.mimetype || "unknown"}`
+          )
+          .join("; ")
+      : "None"
+  }
   * DO NOT include files that are just mentioned in passing or not relevant to the task itself
 - Project selection:
   * Analyze the conversation to determine which project this task belongs to
   * Look for mentions of project names, product names, or areas of work
-  * If no specific project is mentioned or unclear, use "Instructa.ai - Website, SEO & Design" as the default
+  * ${defaultProjectInstruction}
   * Only select from the available projects listed above`,
       });
 
-      // If no assignee was extracted, use the message sender
       const assignee = result.object.assignee || user;
 
-      // Filter files based on AI selection
       let selectedFiles: any[] = [];
       if (
         result.object.includeFileIds &&
@@ -185,9 +199,6 @@ Guidelines:
         selectedFiles = files.filter((file: any) =>
           result.object.includeFileIds?.includes(file.id)
         );
-        console.log(
-          `AI selected ${selectedFiles.length} out of ${files.length} files for the task`
-        );
       }
 
       return {
@@ -196,17 +207,12 @@ Guidelines:
         priority: result.object.priority || "3rd Prio",
         dueDate: result.object.dueDate,
         assignee,
-        project:
-          result.object.project || "Instructa.ai - Website, SEO & Design",
+        project: result.object.project || configuredDefaultProject,
         files: selectedFiles,
       };
     } catch (error) {
-      console.error(
-        "AI parsing failed, falling back to simple parsing:",
-        error
-      );
+      console.error("AI parsing failed, falling back to simple parsing:", error);
 
-      // Fallback to simple parsing - no files included by default
       const lines = text.split("\n");
       const title = lines[0] || "New Task from Slack";
       const description = lines.slice(1).join("\n") || "";
@@ -223,7 +229,7 @@ Guidelines:
           | "Remember 💭",
         dueDate: undefined,
         assignee: user,
-        project: "Instructa.ai - Website, SEO & Design",
+        project: configuredDefaultProject,
         files: [],
       };
     }
@@ -255,11 +261,9 @@ const createTaskStep = createStep({
     taskUrl: z.string().optional(),
     message: z.string(),
   }),
-  execute: async ({ inputData }) => {
+  execute: async ({ inputData }: { inputData: any }) => {
     try {
       const notionService = new NotionService();
-
-      // Pass the files directly to the createTask method
       const result = await notionService.createTask(inputData);
 
       return {

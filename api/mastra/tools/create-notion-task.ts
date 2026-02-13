@@ -1,4 +1,4 @@
-import { createTool } from "@mastra/core";
+import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { NotionService } from "../integrations/notion.js";
 
@@ -21,10 +21,10 @@ export const createNotionTask = createTool({
     url: z.string(),
     success: z.boolean(),
   }),
-  execute: async (context) => {
+  execute: async (inputData) => {
     try {
       const notionService = new NotionService();
-      const result = await notionService.createTask(context.context);
+      const result = await notionService.createTask(inputData);
 
       return result;
     } catch (error) {

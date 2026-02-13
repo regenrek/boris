@@ -6,6 +6,7 @@ import { slackToNotionWorkflow } from "./workflows/slack-to-notion-workflow.js";
 export const mastra = new Mastra({
   workflows: { slackToNotionWorkflow },
   storage: new LibSQLStore({
+    id: "primary-storage",
     url: process.env.DATABASE_URL || "file:./mastra.db",
   }),
   logger: new PinoLogger({
