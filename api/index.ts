@@ -10,7 +10,7 @@ import {
 import { InMemoryIdempotencyStore } from "./utils/idempotency.js";
 import { verifySlackRequestSignature } from "./utils/slack-security.js";
 
-const app = new Hono().basePath("/api");
+export const app = new Hono().basePath("/api");
 
 const processedEventIds = new InMemoryIdempotencyStore({
   ttlMs: 60 * 60 * 1000,
@@ -29,6 +29,19 @@ function verifySlackRequest(rawBody: string, signature?: string, timestamp?: str
     timestamp,
     signingSecret: process.env.SLACK_SIGNING_SECRET,
   });
+}
+
+function scheduleBackgroundTask(task: Promise<void>) {
+  try {
+    waitUntil(task);
+  } catch {
+    task.catch((error) => {
+      console.error(
+        "Background task failed:",
+        error instanceof Error ? error.message : String(error)
+      );
+    });
+  }
 }
 
 function parseJsonSafely(rawBody: string): any | null {
@@ -80,7 +93,7 @@ app.post("/slack/events", async (c) => {
 
   try {
     if (event.type === "app_mention") {
-      waitUntil(
+      scheduleBackgroundTask(
         processAppMentionAsync({
           text: event.text || "",
           user: event.user || "",
@@ -98,7 +111,7 @@ app.post("/slack/events", async (c) => {
       event.text &&
       !event.bot_id
     ) {
-      waitUntil(
+      scheduleBackgroundTask(
         processDirectMessageAsync({
           text: event.text,
           user: event.user || "",
@@ -173,7 +186,7 @@ app.post("/slack/slash-command", async (c) => {
     );
   }
 
-  waitUntil(
+  scheduleBackgroundTask(
     processTaskAsync({
       text,
       userId,

@@ -19,8 +19,8 @@ Built for teams that want fast task capture from real conversations without manu
 Runtime requirement: Node.js `24.13+` (LTS line).
 
 1. Create your Slack app and Notion integration:
-- Slack setup: `docs/slack-setup.md`
-- Notion setup: `docs/notion-setup.md`
+- Slack setup: [docs/slack-setup.md](docs/slack-setup.md)
+- Notion setup: [docs/notion-setup.md](docs/notion-setup.md)
 
 2. Install and run:
 
@@ -45,7 +45,7 @@ OPENAI_API_KEY=<your_openai_api_key>
 - Events URL: `https://your-app-domain/api/slack/events`
 - Slash command URL: `https://your-app-domain/api/slack/slash-command`
 
-If you want a full first-run walkthrough, use `docs/quickstart.md`.
+If you want a full first-run walkthrough, use [docs/quickstart.md](docs/quickstart.md).
 
 ## Environment Variables (At a Glance)
 
@@ -60,20 +60,20 @@ If you want a full first-run walkthrough, use `docs/quickstart.md`.
 | `DATABASE_URL` | No | Persistence store (default: local SQLite/libSQL file) |
 | `MASTRA_LOG_LEVEL` | No | Log level override (`info`, `debug`, etc.) |
 
-Full reference: `docs/environment-variables.md`.
+Full reference: [docs/environment-variables.md](docs/environment-variables.md).
 
 ## Docs
 
-Start here: `docs/README.md`
+Start here: [docs/README.md](docs/README.md)
 
-- Fast setup: `docs/quickstart.md`
-- Slack app setup: `docs/slack-setup.md`
-- Notion setup: `docs/notion-setup.md`
-- Deploy to Vercel: `docs/deployment-vercel.md`
-- Usage examples: `docs/usage.md`
-- Troubleshooting: `docs/troubleshooting.md`
-- Security: `docs/security.md`
-- Architecture: `docs/architecture.md`
+- Fast setup: [docs/quickstart.md](docs/quickstart.md)
+- Slack app setup: [docs/slack-setup.md](docs/slack-setup.md)
+- Notion setup: [docs/notion-setup.md](docs/notion-setup.md)
+- Deploy to Vercel: [docs/deployment-vercel.md](docs/deployment-vercel.md)
+- Usage examples: [docs/usage.md](docs/usage.md)
+- Troubleshooting: [docs/troubleshooting.md](docs/troubleshooting.md)
+- Security: [docs/security.md](docs/security.md)
+- Architecture: [docs/architecture.md](docs/architecture.md)
 
 ## Common Commands
 
@@ -93,4 +93,4 @@ pnpm test:coverage
 
 ## License
 
-ISC
+[MIT](LICENSE)
